@@ -181,4 +181,192 @@ class InventoryServiceTest extends TestCase
             'stock_after' => 15,
         ]);
     }
+    public function test_stock_transfer_moves_stock_between_warehouses(): void
+    {
+        $category = Category::create([
+            'name' => 'Aksesoris',
+            'slug' => 'aksesoris',
+        ]);
+
+        $product = Product::create([
+            'category_id' => $category->id,
+            'sku' => 'ACC-003',
+            'name' => 'Headset',
+            'unit' => 'pcs',
+            'cost_price' => 100000,
+            'selling_price' => 150000,
+            'is_active' => true,
+        ]);
+
+        $warehouseA = Warehouse::create([
+            'code' => 'WH-01',
+            'name' => 'Gudang A',
+            'is_active' => true,
+        ]);
+
+        $warehouseB = Warehouse::create([
+            'code' => 'WH-02',
+            'name' => 'Gudang B',
+            'is_active' => true,
+        ]);
+
+        $stockA = Stock::create([
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseA->id,
+            'quantity' => 20,
+        ]);
+
+        $service = app(InventoryService::class);
+
+        $service->transfer(
+            $product->id,
+            $warehouseA->id,
+            $warehouseB->id,
+            5,
+            'Transfer antar gudang'
+        );
+
+        // Stok gudang asal berkurang
+        $this->assertDatabaseHas('stocks', [
+            'id' => $stockA->id,
+            'quantity' => 15,
+        ]);
+
+        // Stok gudang tujuan bertambah
+        $this->assertDatabaseHas('stocks', [
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseB->id,
+            'quantity' => 5,
+        ]);
+
+        // Total stok tetap 20
+        $totalStock = Stock::where('product_id', $product->id)
+            ->sum('quantity');
+
+        $this->assertEquals(20, $totalStock);
+
+        // Transfer menghasilkan dua movement
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseA->id,
+            'type' => 'TRANSFER_OUT',
+            'quantity' => 5,
+            'stock_before' => 20,
+            'stock_after' => 15,
+        ]);
+
+        $this->assertDatabaseHas('stock_movements', [
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseB->id,
+            'type' => 'TRANSFER_IN',
+            'quantity' => 5,
+            'stock_before' => 0,
+            'stock_after' => 5,
+        ]);
+
+        $this->assertDatabaseCount('stock_movements', 2);
+    }
+    public function test_stock_transfer_fails_when_source_stock_is_insufficient(): void
+    {
+        $category = Category::create([
+            'name' => 'Aksesoris',
+            'slug' => 'aksesoris',
+        ]);
+
+        $product = Product::create([
+            'category_id' => $category->id,
+            'sku' => 'ACC-004',
+            'name' => 'Webcam',
+            'unit' => 'pcs',
+            'cost_price' => 200000,
+            'selling_price' => 300000,
+            'is_active' => true,
+        ]);
+
+        $warehouseA = Warehouse::create([
+            'code' => 'WH-01',
+            'name' => 'Gudang A',
+            'is_active' => true,
+        ]);
+
+        $warehouseB = Warehouse::create([
+            'code' => 'WH-02',
+            'name' => 'Gudang B',
+            'is_active' => true,
+        ]);
+
+        $stockA = Stock::create([
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseA->id,
+            'quantity' => 3,
+        ]);
+
+        $service = app(InventoryService::class);
+
+        try {
+            $service->transfer(
+                $product->id,
+                $warehouseA->id,
+                $warehouseB->id,
+                5,
+                'Transfer stok tidak mencukupi'
+            );
+
+            $this->fail('Transfer seharusnya ditolak.');
+        } catch (\RuntimeException $exception) {
+            $this->assertEquals(
+                'Stok gudang asal tidak mencukupi.',
+                $exception->getMessage()
+            );
+        }
+
+        // Stok asal tetap 3
+        $this->assertDatabaseHas('stocks', [
+            'id' => $stockA->id,
+            'quantity' => 3,
+        ]);
+
+        // Stok tujuan tidak boleh terbentuk karena transaksi rollback
+        $this->assertDatabaseMissing('stocks', [
+            'product_id' => $product->id,
+            'warehouse_id' => $warehouseB->id,
+        ]);
+
+        // Tidak ada movement yang tercatat
+        $this->assertDatabaseCount('stock_movements', 0);
+    }
+
+    public function test_transfer_fails_when_source_and_destination_are_same(): void
+    {
+        $service = app(InventoryService::class);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Gudang asal dan tujuan tidak boleh sama.'
+        );
+
+        $service->transfer(
+            1,
+            1,
+            1,
+            5
+        );
+    }
+
+    public function test_transfer_fails_when_quantity_is_zero(): void
+    {
+        $service = app(InventoryService::class);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Jumlah transfer harus lebih dari 0.'
+        );
+
+        $service->transfer(
+            1,
+            1,
+            2,
+            0
+        );
+    }
 }

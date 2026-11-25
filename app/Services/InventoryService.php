@@ -132,5 +132,105 @@ class InventoryService
             return $stock->fresh();
         });
     }
+    public function transfer(
+        int $productId,
+        int $fromWarehouseId,
+        int $toWarehouseId,
+        int $quantity,
+        ?string $notes = null
+    ): void {
+        if ($quantity <= 0) {
+            throw new \InvalidArgumentException(
+                'Jumlah transfer harus lebih dari 0.'
+            );
+        }
 
+        if ($fromWarehouseId === $toWarehouseId) {
+            throw new \InvalidArgumentException(
+                'Gudang asal dan tujuan tidak boleh sama.'
+            );
+        }
+
+        DB::transaction(function () use (
+            $productId,
+            $fromWarehouseId,
+            $toWarehouseId,
+            $quantity,
+            $notes
+        ) {
+            // 1. Ambil dan kunci stok gudang asal
+            $sourceStock = Stock::where('product_id', $productId)
+                ->where('warehouse_id', $fromWarehouseId)
+                ->lockForUpdate()
+                ->first();
+
+            if (!$sourceStock) {
+                throw new RuntimeException(
+                    'Stok produk di gudang asal belum tersedia.'
+                );
+            }
+
+            if ($sourceStock->quantity < $quantity) {
+                throw new RuntimeException(
+                    'Stok gudang asal tidak mencukupi.'
+                );
+            }
+
+            // 2. Siapkan stok gudang tujuan
+            Stock::firstOrCreate(
+                [
+                    'product_id' => $productId,
+                    'warehouse_id' => $toWarehouseId,
+                ],
+                [
+                    'quantity' => 0,
+                ]
+            );
+
+            // Kunci stok gudang tujuan
+            $destinationStock = Stock::where('product_id', $productId)
+                ->where('warehouse_id', $toWarehouseId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            // 3. Simpan kondisi stok sebelum transfer
+            $sourceBefore = $sourceStock->quantity;
+            $destinationBefore = $destinationStock->quantity;
+
+            // 4. Update stok
+            $sourceStock->quantity -= $quantity;
+            $sourceStock->save();
+
+            $destinationStock->quantity += $quantity;
+            $destinationStock->save();
+
+            // 5. Catat movement keluar
+            StockMovement::create([
+                'stock_id' => $sourceStock->id,
+                'product_id' => $productId,
+                'warehouse_id' => $fromWarehouseId,
+                'type' => 'TRANSFER_OUT',
+                'quantity' => $quantity,
+                'stock_before' => $sourceBefore,
+                'stock_after' => $sourceStock->quantity,
+                'reference_type' => 'TRANSFER',
+                'notes' => $notes,
+                'created_by' => Auth::id(),
+            ]);
+
+            // 6. Catat movement masuk
+            StockMovement::create([
+                'stock_id' => $destinationStock->id,
+                'product_id' => $productId,
+                'warehouse_id' => $toWarehouseId,
+                'type' => 'TRANSFER_IN',
+                'quantity' => $quantity,
+                'stock_before' => $destinationBefore,
+                'stock_after' => $destinationStock->quantity,
+                'reference_type' => 'TRANSFER',
+                'notes' => $notes,
+                'created_by' => Auth::id(),
+            ]);
+        });
+    }
 }
